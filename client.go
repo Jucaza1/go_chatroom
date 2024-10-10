@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"math/rand"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
@@ -34,8 +36,9 @@ func NewClient(ctx context.Context, cancel context.CancelFunc, hub *Hub, conn *w
 	return Client{
 		ctx:       ctx,
 		cancelCtx: cancel,
+        id: rand.Uint32(),
 		hub:       hub,
-		send:      make(chan *ClientMessage), conn: conn,
+		send:      make(chan *ClientMessage,256), conn: conn,
 	}
 }
 
@@ -56,17 +59,12 @@ func (c *Client) writeConn() {
 				//TODO handle error
 				return
 			}
-            w.Write([]byte(fmt.Sprintf("%d",message.id)))
-            w.Write([]byte{' ',':','\n'})
+			w.Write([]byte(fmt.Sprintf("%d", message.id)))
+			w.Write([]byte{' ', ':', '\n'})
 			w.Write(message.message)
 			w.Write([]byte{'\n'})
-			// for i := 0; i < len(c.send); i++ {
-			// 	w.Write([]byte("\n"))
-			//              if message,ok:=<-c.send;ok{
-			// 	w.Write(message.message)
-			//              }
-			// }
-			if err := c.conn.Close(); err != nil {
+            //important to close the writer
+			if err := w.Close(); err != nil {
 				return
 			}
 		case <-ticker.C:
@@ -88,7 +86,8 @@ func (c *Client) readConn() {
 	c.conn.SetReadDeadline(time.Now().Add(pongWait))
 	c.conn.SetPongHandler(
 		func(string) error {
-			return c.conn.SetReadDeadline(time.Now().Add(pongWait))
+			c.conn.SetReadDeadline(time.Now().Add(pongWait))
+			return nil
 		},
 	)
 	for {
@@ -99,12 +98,15 @@ func (c *Client) readConn() {
 			messageType, message, err := c.conn.ReadMessage()
 			if err != nil {
 				//TODO handle error
+				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+					log.Printf("error: %v", err)
+				}
 				return
 			}
 			if messageType == websocket.TextMessage {
 				c.hub.broadcast <- &ClientMessage{
 					id:      c.id,
-					message: bytes.Trim(bytes.Replace(message, []byte{'\n'}, []byte{' '}, -1), " "),
+					message: bytes.TrimSpace(bytes.Replace(message, []byte{'\n'}, []byte{' '}, -1)),
 				}
 			}
 		}
@@ -112,17 +114,24 @@ func (c *Client) readConn() {
 }
 
 func (c *Client) shutdown() {
+	c.hub.unregister <- c
 	c.conn.WriteMessage(websocket.CloseMessage, []byte{})
 	c.conn.Close()
-	close(c.send)
+	if _, ok := <-c.send; ok {
+		close(c.send)
+	}
 }
 
 func MakeWSHandler(ctx context.Context, hub *Hub) http.HandlerFunc {
-	upgrader := websocket.Upgrader{}
+	upgrader := websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
+			return
 		}
 		ctx, cancel := context.WithCancel(ctx)
 		client := NewClient(ctx, cancel, hub, conn)

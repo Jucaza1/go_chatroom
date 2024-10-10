@@ -13,8 +13,9 @@ type Hub struct {
 	unregister chan *Client
 }
 
-func NewHub() Hub {
+func NewHub(ctx context.Context) Hub {
 	return Hub{
+        ctx: ctx,
 		clients:    make(map[*Client]bool),
 		broadcast:  make(chan *ClientMessage),
 		register:   make(chan *Client),
